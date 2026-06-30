@@ -93,48 +93,30 @@ def save_ratings_to_db(ratings_dict):
 init_db()
 
 # -------------------------------------------------------------------------
-# 3. 歷史資料庫 (精確鎖定 GitHub 根目錄的 racing_records2.csv)
+# 3. 歷史資料庫 (多重路徑探索器)
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_historical_records():
-    possible_dirs = [
-        os.path.dirname(os.path.abspath(__file__)),
-        os.getcwd()
+    possible_paths = [
+        "racing_records2.csv",
+        os.path.join(os.getcwd(), "racing_records2.csv"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "racing_records2.csv")
     ]
     
-    target_name = "racing_records2.csv"
-    found_path = None
-    
-    # 1. 智能掃描目錄，忽略大小寫尋找檔案
-    for d in possible_dirs:
-        if found_path: break
-        if os.path.exists(d):
+    for path in possible_paths:
+        if os.path.exists(path):
             try:
-                for f in os.listdir(d):
-                    if f.lower() == target_name.lower():
-                        found_path = os.path.join(d, f)
-                        break
-            except Exception:
-                pass
-                
-    # 2. 如果找到了檔案，嘗試用不同編碼強力讀取
-    if found_path:
-        encodings_to_try = ['utf-8', 'utf-8-sig', 'big5', 'gb18030', 'latin1']
-        for enc in encodings_to_try:
-            try:
-                df = pd.read_csv(found_path, encoding=enc)
-                # 清洗馬名字串，確保後續比對不會因為空白字元出錯
+                df = pd.read_csv(path)
                 name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
                 if name_cols:
                     df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
                 return df
             except Exception:
-                continue # 若編碼錯誤 (UnicodeDecodeError)，自動換下一個編碼再試
-                
+                continue
     return pd.DataFrame()
 
 # -------------------------------------------------------------------------
-# 4. 數據驅動因子運算引擎 (Alpha & Gamma)
+# 4. 數據驅動因子運算引擎
 # -------------------------------------------------------------------------
 def calculate_time_momentum(horse_name, df_hist):
     if df_hist.empty: return 1.0
@@ -216,7 +198,6 @@ def evaluate_distance_shift(horse_name, target_dist, trainer_name, df_hist):
 def get_dynamic_human_score(df_hist, role, name):
     if df_hist.empty: return 10 
     
-    # 支援更多欄位可能命名
     role_col = next((c for c in df_hist.columns if role.lower() in c.lower() or ('騎' in c if role=='Jockey' else '練' in c)), None)
     pos_col = next((c for c in df_hist.columns if 'place' in c.lower() or 'finish' in c.lower() or '名次' in c or 'pos' in c.lower() or 'pl' in c.lower()), None)
     date_col = next((c for c in df_hist.columns if 'date' in c.lower() or '日期' in c), None)
@@ -225,10 +206,8 @@ def get_dynamic_human_score(df_hist, role, name):
     
     clean_name = name.split('(')[0].strip()
     
-    # 防呆處理：絕不修改 df_hist 避免 Streamlit Cache 崩潰
-    # 使用獨立的 Series 進行處理與比對
-    clean_roles = df_hist[role_col].astype(str).apply(lambda x: x.split('(')[0].strip())
-    df_target = df_hist[clean_roles.str.contains(clean_name, na=False, regex=False)]
+    df_hist['temp_clean_role'] = df_hist[role_col].astype(str).apply(lambda x: x.split('(')[0].strip())
+    df_target = df_hist[df_hist['temp_clean_role'].str.contains(clean_name, na=False)]
     
     if len(df_target) == 0: return 5 
     
@@ -239,7 +218,6 @@ def get_dynamic_human_score(df_hist, role, name):
         
     df_recent = df_target.head(30)
     
-    # 強化勝出判定，支援 "1.0", "01", "1 DH" 等複雜格式
     def is_win(x):
         s = str(x).strip()
         m = re.match(r'^(\d+)', s)
@@ -374,22 +352,70 @@ def custom_opacity_styler(s):
         styles.append(f'background-color: rgba(31, 119, 180, {alpha:.2f}); color: #000000; font-weight: 500;')
     return styles
 
-def generate_horse_commentary(row):
+# -------------------------------------------------------------------------
+# 6. 動態邏輯辯證點評引擎 (Dynamic Logical Reasoning Engine)
+# -------------------------------------------------------------------------
+def generate_dynamic_commentary(row, total_horses):
     comments = []
-    if row['Alpha'] > 85: comments.append("🔥 **狀態大勇**：近仗表現與完成時間極佳。")
-    elif row['Alpha'] < 30: comments.append("🧊 **狀態低迷**：近績欠佳且時間衰退。")
-    if row.get('Dist_Shift_Multiplier', 1.0) > 1.1: comments.append("🔄 **途程利好**：轉換途程完美契合跑法。")
     
-    if row['Beta'] >= 80: comments.append("🛤️ **黃金檔位**：抽得內檔，走位優勢極大。")
-    elif row['Beta'] <= 30: comments.append("⚠️ **外檔劣勢**：檔位偏外，需消耗額外體力切入。")
-    
-    if row['Gamma'] >= 70: comments.append("👨‍🔧 **騎練強陣**：大數據顯示該騎練組合近期勝率極高，手風極順。")
-    elif row['Gamma'] <= 30: comments.append("📉 **人為弱勢**：騎練近期數據處於低迷期或受主觀降分處分。")
-    
-    if row['Delta'] > 50: comments.append("⚖️ **磅分優勢**：在同班次中享有明顯讓磅利好。")
-    elif row['Delta'] < 40: comments.append("🧱 **重磅吃虧**：負重不利，考驗末段衝刺力。")
-    
-    if not comments: return "平穩發揮，需視臨場形勢與對手表現。"
+    # 判定該馬匹的戰力區間
+    rank = row['Rank']
+    is_top_contender = rank <= 3
+    is_mid_tier = 3 < rank <= total_horses // 2
+    is_long_shot = rank > total_horses // 2
+
+    # 1. 解釋矛盾數據：高動能 (Time_Multiplier) 但低基礎分 (Base_Form) -> 導致排名低
+    if row['Time_Multiplier'] > 1.05 and row['Base_Form'] < 30:
+        if is_long_shot:
+            comments.append("🔍 **隱藏動能被基礎拖累**：雖然近期完成時間有加快 (段速進步)，但因過往名次太差導致基數極低，整體實力仍不足以在此班次構成威脅，可能仍在減分期。")
+        else:
+            comments.append("⚡ **冷門伏兵信號**：近績雖然難看，但大數據偵測到其真實段速正顯著提升，隨時有爆冷潛力。")
+            
+    # 2. 解釋矛盾數據：低動能 (Time_Multiplier) 但高基礎分 (Base_Form) -> 導致排名不如預期
+    elif row['Time_Multiplier'] < 0.95 and row['Base_Form'] > 70:
+        if is_top_contender:
+            comments.append("⚠️ **贏馬指標衰退**：雖然近績亮眼撐起了預期勝率，但實際完成時間正在衰退，需提防熱倒。")
+        else:
+            comments.append("📉 **虛火褪去**：表面近績好但速度明顯變慢，模型因此對其排名進行了降級處分。")
+            
+    # 3. 正常強弱勢判定 (Alpha)
+    elif row['Alpha'] > 85: 
+        comments.append("🔥 **綜合狀態大勇**：近仗名次與段速皆維持在高水準，具備贏馬說服力。")
+    elif row['Alpha'] < 30 and not (row['Time_Multiplier'] > 1.05 and row['Base_Form'] < 30):
+        comments.append("🧊 **全方位低迷**：近績欠佳且時間未見起色，建議觀望。")
+        
+    # 4. 途程與跑法適應性解讀
+    if row.get('Dist_Shift_Multiplier', 1.0) >= 1.15:
+        comments.append("🔄 **途程極度利好**：上仗走位顯示原途程不合腳法，本次轉換途程完美契合，預計能釋放龐大潛力。")
+    elif row.get('Dist_Shift_Multiplier', 1.0) <= 0.85:
+        comments.append("❌ **途程極度不利**：轉換途程暴露出長力盲點或步速不適應，對戰鬥力大打折扣。")
+
+    # 5. 人為因素解析 (Gamma)
+    if row['Gamma'] >= 75:
+        if is_long_shot:
+            comments.append("👨‍🔧 **騎練強陣撐腰**：雖然馬匹本身數據平庸，但配上近期手風極順的騎練組合，為最大變數。")
+        else:
+            comments.append("👨‍🔧 **騎練強陣**：大數據顯示該騎練組合近期勝率極高，人和優勢明顯。")
+    elif row['Gamma'] <= 35:
+        if is_top_contender:
+            comments.append("📉 **人為隱憂**：馬匹數據頂尖，但需留意騎練近期數據處於低迷期，或受主觀降分處分拖累。")
+        else:
+            comments.append("📉 **騎練弱勢**：人和方面處於劣勢，缺乏破局動力。")
+
+    # 6. 檔位與磅分影響
+    if row['Beta'] >= 80 and is_mid_tier:
+        comments.append("🛤️ **檔位補救**：整體實力居中，但抽得黃金內檔，有機會藉走位之利偷襲上名。")
+    if row['Beta'] <= 30 and is_top_contender:
+        comments.append("⚠️ **外檔考驗**：實力雖強但檔位偏外，需消耗額外體力切入，考驗騎師發揮。")
+        
+    if row['Delta'] > 60:
+        comments.append("⚖️ **超級輕磅**：在同班次中享有極端讓磅利好。")
+
+    if not comments: 
+        if is_top_contender: return "實力平均且無明顯弱點，合理成為爭勝要角。"
+        elif is_mid_tier: return "各項數據表現中規中矩，需視臨場形勢與對手失準方能上位。"
+        else: return "整體數據缺乏亮點，居於下風。"
+        
     return " ".join(comments)
 
 # -------------------------------------------------------------------------
@@ -403,7 +429,6 @@ if not df_history.empty:
 else:
     st.sidebar.error("⚠️ 警告：無法載入 racing_records2.csv，動能因子失效。")
     
-    # 開發者除錯面板：看看雲端伺服器到底看到了什麼？
     with st.sidebar.expander("🛠️ 展開查看雲端檔案總管 (Debug)"):
         st.write("伺服器目錄下的真實檔案列表：")
         try:
@@ -582,14 +607,16 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                         safe_prob = df['EWP (%)'].replace(0, 0.001) / 100
                         df['Implied Place Div ($10)'] = ((10 * 0.835) / safe_prob).clip(lower=10.1)
                         
-                        df['AI_Commentary'] = df.apply(generate_horse_commentary, axis=1)
-                        
                         df = df.sort_values('EWP (%)', ascending=False).reset_index(drop=True)
                         df['Rank'] = df.index + 1
+                        
+                        # 套用全新的動態邏輯辯證引擎
+                        total_horses = len(df)
+                        df['AI_Commentary'] = df.apply(lambda row: generate_dynamic_commentary(row, total_horses), axis=1)
 
                     if penalized_jockeys:
                         st.warning(f"⚠️ 模型已介入主觀干預：騎師 {', '.join(penalized_jockeys)} 之 Gamma 分數已受到處分。")
-                    st.success("✅ Inference Completed! (騎練與馬匹動能皆由 CSV 真實數據驅動)")
+                    st.success("✅ Inference Completed! (AI 邏輯辯證引擎已啟動)")
                     
                     t1, t2, t3 = st.columns(3)
                     t1.metric(f"🥇 1st Pick: {df.iloc[0]['馬匹名稱']}", f"{df.iloc[0]['EWP (%)']:.1f}%", f"Implied Div: ${df.iloc[0]['Implied Place Div ($10)']:.1f}")
@@ -616,7 +643,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                     
                     st.altair_chart(breakdown_chart, use_container_width=True)
 
-                    st.markdown("#### 💬 AI 質化結論點評 (Qualitative Insights)")
+                    st.markdown("#### 💬 AI 邏輯辯證點評 (Contextual Insights)")
                     commentary_df = df[['Rank', '馬號', '馬匹名稱', 'EWP (%)', 'AI_Commentary']].copy()
                     commentary_df['EWP (%)'] = commentary_df['EWP (%)'].map("{:.1f}%".format)
                     
@@ -627,7 +654,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                             "馬號": "馬號",
                             "馬匹名稱": "馬名",
                             "EWP (%)": "預期勝率",
-                            "AI_Commentary": st.column_config.TextColumn("AI 綜合點評", width="large")
+                            "AI_Commentary": st.column_config.TextColumn("AI 動態辯證結論", width="large")
                         },
                         use_container_width=True, hide_index=True
                     )
