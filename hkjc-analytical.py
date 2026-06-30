@@ -35,7 +35,7 @@ def set_trainer(t_id):
     st.session_state.selected_trainer_id = t_id
 
 # -------------------------------------------------------------------------
-# 2. SQLite 資料庫初始化與操作
+# 2. SQLite 資料庫初始化與操作 (用於快取 HKJC 即時爬蟲數據)
 # -------------------------------------------------------------------------
 DB_PATH = os.path.join(os.path.dirname(__file__), "hkjc_rating_cache.db")
 
@@ -93,14 +93,19 @@ def save_ratings_to_db(ratings_dict):
 init_db()
 
 # -------------------------------------------------------------------------
-# 3. 歷史資料庫：完成時間與途程轉換引擎 (依賴 CSV)
+# 3. 歷史資料庫：完成時間與途程轉換引擎 (專屬 CSV 讀取)
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_historical_records():
+    """專注於讀取與清洗 racing_records2.csv"""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     csv_path = os.path.join(base_dir, "racing_records2.csv")
     try:
         df = pd.read_csv(csv_path)
+        # 關鍵資料清洗：去除馬名欄位的隱藏空白字元
+        name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
+        if name_cols:
+            df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
         return df
     except Exception:
         return pd.DataFrame()
@@ -111,10 +116,16 @@ def calculate_time_momentum(horse_name, df_hist):
     time_cols = [c for c in df_hist.columns if 'time' in c.lower() or '時間' in c]
     dist_cols = [c for c in df_hist.columns if 'dist' in c.lower() or '程' in c or '距離' in c]
     date_cols = [c for c in df_hist.columns if 'date' in c.lower() or '日期' in c]
+    
     if not name_cols or not time_cols or not dist_cols: return 1.0
-    h_df = df_hist[df_hist[name_cols[0]] == horse_name]
+    
+    # 強制去除傳入馬名的空白以確保完美配對
+    clean_horse_name = str(horse_name).strip()
+    h_df = df_hist[df_hist[name_cols[0]] == clean_horse_name]
+    
     if len(h_df) < 2: return 1.0
     if date_cols: h_df = h_df.sort_values(date_cols[0], ascending=False)
+    
     speeds = []
     for _, row in h_df.head(5).iterrows():
         try:
@@ -133,6 +144,7 @@ def calculate_time_momentum(horse_name, df_hist):
                 t_sec = float(re.sub(r'[^\d.]', '', t_str))
             if t_sec > 0: speeds.append(dist / t_sec)
         except Exception: pass
+        
     if len(speeds) >= 2:
         recent_speed = speeds[0]
         avg_past_speed = sum(speeds[1:]) / len(speeds[1:])
@@ -145,34 +157,43 @@ def evaluate_distance_shift(horse_name, target_dist, trainer_name, df_hist):
     if df_hist.empty: return 1.0
     name_cols = [c for c in df_hist.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
     if not name_cols: return 1.0
-    h_df = df_hist[df_hist[name_cols[0]] == horse_name].head(3) 
+    
+    # 強制去除傳入馬名的空白以確保完美配對
+    clean_horse_name = str(horse_name).strip()
+    h_df = df_hist[df_hist[name_cols[0]] == clean_horse_name].head(3) 
+    
     if len(h_df) == 0: return 1.0
     last_run = h_df.iloc[0]
+    
     last_dist_str = str(last_run.get('Distance', '')).replace('米', '').strip()
     if not last_dist_str.isdigit(): return 1.0
     last_dist = int(last_dist_str)
+    
     target_dist = int(str(target_dist).replace('米', '').strip())
     dist_diff = target_dist - last_dist
     if abs(dist_diff) < 200: return 1.0 
+    
     running_pos_str = str(last_run.get('Running_Pos', ''))
     pos_list = [int(p) for p in re.findall(r'\d+', running_pos_str)]
     if len(pos_list) < 2: return 1.0
+    
     early_pos = pos_list[0]       
     finish_pos = pos_list[-1]     
     position_change = early_pos - finish_pos 
     multiplier = 1.0
+    
     if dist_diff >= 200:
         if position_change > 3: multiplier = 1.15
         elif early_pos <= 3 and position_change < -3: multiplier = 0.85
     elif dist_diff <= -200:
         if early_pos <= 3 and position_change < -3: multiplier = 1.15
         elif early_pos >= 10: multiplier = 0.80
+        
     strategic_trainers = ['蔡約翰', '告東尼', '呂健威', '大衛希斯']
     if trainer_name in strategic_trainers and multiplier > 1.0: multiplier += 0.05 
     return multiplier
 
 def get_trainer_dynamic_score(trainer_name, df_hist):
-    # 這裡未來可改成從 df_hist 動態查詢 30 天勝率
     top_trainers = ['伍鵬志', '呂健威', '蔡約翰', '告東尼', '大衛希斯', '方嘉柏']
     long_term_strong = trainer_name in top_trainers
     purple_patch_trainers = ['廖康銘', '巫偉傑', '呂健威']
@@ -298,21 +319,16 @@ def custom_opacity_styler(s):
 # -------------------------------------------------------------------------
 def generate_horse_commentary(row):
     comments = []
-    
-    # Alpha 點評
     if row['Alpha'] > 85: comments.append("🔥 **狀態大勇**：近仗表現與完成時間極佳。")
     elif row['Alpha'] < 30: comments.append("🧊 **狀態低迷**：近績欠佳且時間衰退。")
     if row.get('Dist_Shift_Multiplier', 1.0) > 1.1: comments.append("🔄 **途程利好**：轉換途程完美契合跑法。")
     
-    # Beta 點評
     if row['Beta'] >= 80: comments.append("🛤️ **黃金檔位**：抽得內檔，走位優勢極大。")
     elif row['Beta'] <= 30: comments.append("⚠️ **外檔劣勢**：檔位偏外，需消耗額外體力切入。")
     
-    # Gamma 點評
     if row['Gamma'] >= 70: comments.append("👨‍🔧 **騎練強陣**：配搭頂級騎練，且近期手風極順。")
     elif row['Gamma'] <= 30: comments.append("📉 **人為弱勢**：騎師狀態成疑或受主觀降分處分。")
     
-    # Delta 點評
     if row['Delta'] > 50: comments.append("⚖️ **磅分優勢**：在同班次中享有明顯讓磅利好。")
     elif row['Delta'] < 40: comments.append("🧱 **重磅吃虧**：負重不利，考驗末段衝刺力。")
     
@@ -320,9 +336,17 @@ def generate_horse_commentary(row):
     return " ".join(comments)
 
 # -------------------------------------------------------------------------
-# 側邊欄導覽
+# 側邊欄導覽 & CSV 狀態監控
 # -------------------------------------------------------------------------
 st.sidebar.title("🧭 Quant Terminal")
+
+# 立即載入 CSV 以顯示狀態
+df_history = load_historical_records()
+if not df_history.empty:
+    st.sidebar.success(f"🗄️ CSV 載入成功: {len(df_history)} 筆賽績")
+else:
+    st.sidebar.error("⚠️ 警告：無法載入 racing_records2.csv，動能因子將失效。")
+
 APP_PAGES = [
     "📊 多因子賽前推演 (Multi-Factor Inference)", 
     "🐎 練馬師資產分佈 (Stable Assets)", 
@@ -338,7 +362,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
     st.title("📈 多因子賽事預測終端 (Multi-Factor Expected Probability)")
     st.markdown("""
     基於歷史數據迴歸分析，量化近期動能、賽道偏差、人為加權與讓磅效率的預期上名概率 (Top 3 EWP)。
-    💡 *本模型已連動本地歷史資料庫，Alpha 因子將自動計算馬匹真實完成時間 (Finish Time) 進步幅度與途程轉換效應。*
+    💡 *本模型已連動本地 CSV，Alpha 因子將自動計算馬匹真實完成時間 (Finish Time) 進步幅度與途程轉換效應。*
     """)
 
     with st.expander("📥 數據輸入 (Data Ingestion) - 貼上 HKJC 排位表", expanded=True):
@@ -349,8 +373,6 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
             height=250, 
             label_visibility="collapsed"
         )
-
-    df_history = load_historical_records()
 
     track_condition, course_filter, dist_filter = "好地", "C+3", "1200"
     if raw_text.strip():
@@ -467,6 +489,8 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                         
                         df['Base_Form'] = df['近績'].apply(calc_form_score_place)
                         target_distance = int(dist_filter)
+                        
+                        # 重點：傳入完全清洗並去除空白的馬名，確保能對應到 CSV
                         df['Time_Multiplier'] = df['馬匹名稱'].apply(lambda x: calculate_time_momentum(x, df_history))
                         df['Dist_Shift_Multiplier'] = df.apply(lambda r: evaluate_distance_shift(r['馬匹名稱'], target_distance, r['練馬師'], df_history), axis=1)
                         df['Alpha'] = (df['Base_Form'] * df['Time_Multiplier'] * df['Dist_Shift_Multiplier']).clip(upper=100)
