@@ -26,7 +26,7 @@ TRAINERS = {
     "EDJ": "游達榮 (EDJ)"
 }
 
-COMMON_JOCKEYS = ['潘頓', '布文', '田泰安', '鍾易禮', '周俊樂', '何澤堯', '巴度', '霍宏聲', '班德禮', '艾兆禮', '董明朗', '楊明綸', '巫顯東', '潘明輝', '奧爾民', '金誠剛']
+COMMON_JOCKEYS = ['潘頓','艾兆禮','布文','田泰安','周俊樂','巴度','何澤堯','班德禮','霍宏聲','奧爾民','梁家俊','莫雷拉','潘明輝','希威森','鍾易禮','艾道拿','黃智弘','楊明綸','金誠剛','蔡明紹','黃寶妮','袁幸堯','布浩榮','巫顯東']
 
 if "selected_trainer_id" not in st.session_state:
     st.session_state.selected_trainer_id = "ALL"
@@ -216,8 +216,9 @@ def evaluate_distance_shift(horse_name, target_dist, trainer_name, df_hist):
 def get_dynamic_human_score(df_hist, role, name):
     if df_hist.empty: return 10 
     
+    # 支援更多欄位可能命名
     role_col = next((c for c in df_hist.columns if role.lower() in c.lower() or ('騎' in c if role=='Jockey' else '練' in c)), None)
-    pos_col = next((c for c in df_hist.columns if 'place' in c.lower() or 'finish' in c.lower() or '名次' in c), None)
+    pos_col = next((c for c in df_hist.columns if 'place' in c.lower() or 'finish' in c.lower() or '名次' in c or 'pos' in c.lower() or 'pl' in c.lower()), None)
     date_col = next((c for c in df_hist.columns if 'date' in c.lower() or '日期' in c), None)
     
     if not role_col or not pos_col: return 10
@@ -238,9 +239,13 @@ def get_dynamic_human_score(df_hist, role, name):
         
     df_recent = df_target.head(30)
     
+    # 強化勝出判定，支援 "1.0", "01", "1 DH" 等複雜格式
     def is_win(x):
         s = str(x).strip()
-        return 1 if s == '1' else 0
+        m = re.match(r'^(\d+)', s)
+        if m and m.group(1) == '1':
+            return 1
+        return 0
         
     wins = df_recent[pos_col].apply(is_win).sum()
     win_rate = wins / len(df_recent) if len(df_recent) > 0 else 0
