@@ -632,7 +632,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
             weight_compare_df = pd.DataFrame({
                 "預測因子項目 (Factors)": ["α: 近績/動能/適應性", "β: 動態檔位偏差", "γ: 騎練真實勝率", "δ: 班次壓制與磅分"],
                 "1. AI 基準經驗權重": [f"{base_w['Alpha (近/時/程)']}%", f"{base_w['Beta (檔位)']}%", f"{base_w['Gamma (騎練)']}%", f"{base_w['Delta (磅分)']}%"],
-                f"2. 歷史最佳化建議": [f"{hist_w['Alpha (近/時/程)']}%", f"{hist_w['Beta (檔位)']}%", f"{hist_w['Gamma (騎練)']}%", f"{hist_w['Delta (磅分)']}%"],
+                "2. 歷史最佳化建議": [f"{hist_w['Alpha (近/時/程)']}%", f"{hist_w['Beta (檔位)']}%", f"{hist_w['Gamma (騎練)']}%", f"{hist_w['Delta (磅分)']}%"],
                 "3. 當前實際運算權重": [f"{custom_w['Alpha (近/時/程)']:.1f}%", f"{custom_w['Beta (檔位)']:.1f}%", f"{custom_w['Gamma (騎練)']:.1f}%", f"{custom_w['Delta (磅分)']:.1f}%"]
             })
             st.table(weight_compare_df)
@@ -781,7 +781,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                     st.divider()
 
                     # =========================================================
-                    # 全新高階視覺化區塊
+                    # 全新高階視覺化區塊 (Enhanced Visuals)
                     # =========================================================
                     st.markdown("### 📊 高階量化特徵分析 (Advanced Feature Analysis)")
                     
@@ -789,54 +789,115 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                     
                     with v_col1:
                         st.markdown("#### 🕸️ 單駒五維能力雷達圖")
-                        selected_horse = st.selectbox("選擇馬匹查看雷達圖 (Radar Chart):", df['馬匹名稱'].tolist(), label_visibility="collapsed")
+                        st.caption("點擊下方馬匹名稱以快速切換其量化特徵 (取代舊版下拉選單)")
+                        # 改用 horizontal radio 代替 selectbox，提供類似按鈕群組的快速點擊體驗
+                        selected_horse = st.radio(
+                            "Select Horse:", 
+                            df['馬匹名稱'].tolist(), 
+                            horizontal=True, 
+                            label_visibility="collapsed"
+                        )
+                        
                         h_data = df[df['馬匹名稱'] == selected_horse].iloc[0]
                         categories = ['動能 (Alpha)', '檔位優勢 (Beta)', '騎練加持 (Gamma)', '班次壓制 (Delta)', '動能 (Alpha)'] # 閉合
                         values = [h_data['Alpha'], h_data['Beta'], h_data['Gamma'], h_data['Delta'], h_data['Alpha']]
                         
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatterpolar(
+                        # 升級的 Plotly 雷達圖，加入酷炫的光暈與填色效果
+                        fig_radar = go.Figure()
+                        fig_radar.add_trace(go.Scatterpolar(
                             r=values, theta=categories, fill='toself', name=selected_horse,
-                            line_color='#1f77b4', fillcolor='rgba(31, 119, 180, 0.4)'
+                            line=dict(color='#00F0FF', width=3), # 科技感青色線條
+                            fillcolor='rgba(0, 240, 255, 0.25)', # 半透明填充
+                            marker=dict(color='white', size=8, line=dict(color='#00F0FF', width=2))
                         ))
-                        fig.update_layout(
-                            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-                            showlegend=False, height=350, margin=dict(l=40, r=40, t=20, b=20)
+                        fig_radar.update_layout(
+                            polar=dict(
+                                radialaxis=dict(visible=True, range=[0, 100], gridcolor='rgba(128,128,128,0.2)'),
+                                angularaxis=dict(gridcolor='rgba(128,128,128,0.2)')
+                            ),
+                            showlegend=False, 
+                            height=380, 
+                            margin=dict(l=40, r=40, t=30, b=30),
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig_radar, use_container_width=True)
 
                     with v_col2:
                         st.markdown("#### 📈 賽道偏差熱力圖")
                         if bias_data and 'rates' in bias_data:
                             draws = list(bias_data['rates'].keys())
                             rates = list(bias_data['rates'].values())
-                            hm_df = pd.DataFrame({'檔位': draws, '歷史上名率(%)': rates})
-                            hm_chart = alt.Chart(hm_df).mark_rect().encode(
-                                x=alt.X('檔位:O', title='檔位 (Draw)'),
-                                color=alt.Color('歷史上名率(%):Q', scale=alt.Scale(scheme='reds', domain=[0, max(rates)+5])),
-                                tooltip=['檔位', alt.Tooltip('歷史上名率(%):Q', format='.1f')]
-                            ).properties(height=280)
-                            st.altair_chart(hm_chart, use_container_width=True)
-                            st.caption(f"由歷史 {course_filter} 賽道 {dist_filter}m 數據動態生成。")
+                            
+                            # 將 Altair 升級為高階 Plotly Heatmap，加入數值文字與精美的漸層
+                            fig_hm = go.Figure(data=go.Heatmap(
+                                z=[rates],
+                                x=[f"檔位 {d}" for d in draws],
+                                y=["上名機率"],
+                                colorscale='YlGnBu', # 專業數據分析常用色階
+                                text=[[f"{r:.1f}%" for r in rates]],
+                                texttemplate="%{text}",
+                                showscale=True,
+                                xgap=3, # 增加視覺區塊感
+                                ygap=3,
+                                hoverinfo="x+z"
+                            ))
+                            fig_hm.update_layout(
+                                height=250, 
+                                margin=dict(t=30, b=40, l=10, r=10),
+                                yaxis=dict(showticklabels=False) # 隱藏 Y 軸標籤以節省空間
+                            )
+                            st.plotly_chart(fig_hm, use_container_width=True)
+                            st.caption(f"由歷史 {course_filter} 賽道 {dist_filter}m 數據動態生成。色塊越深代表該檔位歷史上名機率越高。")
                         else:
                             st.info("⚠️ 該賽道/途程之歷史樣本數不足，已切換至預設常規檔位分數。")
 
                     st.markdown("#### 📊 體能週期與動能散佈圖 (Fitness Cycle vs Alpha)")
+                    st.caption("氣泡大小與顏色映射了馬匹的預期勝率 (EWP)；落在綠色「黃金週期」內的馬匹，其生理動能通常處於最佳狀態。")
                     scatter_df = df[df['DSR_Days'] >= 0].copy()
+                    
                     if not scatter_df.empty:
-                        scatter_chart = alt.Chart(scatter_df).mark_circle(size=120, opacity=0.8).encode(
-                            x=alt.X('DSR_Days:Q', title='休息天數 (DSR)', scale=alt.Scale(domain=[-5, scatter_df['DSR_Days'].max()+10])),
-                            y=alt.Y('Alpha:Q', title='綜合動能 (Alpha)', scale=alt.Scale(domain=[0, 100])),
-                            color=alt.Color('EWP (%):Q', scale=alt.Scale(scheme='viridis')),
-                            tooltip=['馬匹名稱', 'DSR_Days', alt.Tooltip('Alpha:Q', format='.1f'), alt.Tooltip('EWP (%):Q', format='.1f')]
-                        ).properties(height=300)
-                        
-                        # 標示出 14-28 天的黃金週期區間
-                        golden_zone = pd.DataFrame({'start': [14], 'end': [28]})
-                        rect = alt.Chart(golden_zone).mark_rect(opacity=0.1, color='green').encode(
-                            x='start:Q', x2='end:Q'
+                        # 升級為 Plotly 氣泡圖，加入文字標籤與自訂高亮區域
+                        fig_scatter = px.scatter(
+                            scatter_df, 
+                            x="DSR_Days", 
+                            y="Alpha", 
+                            size="EWP (%)", 
+                            color="EWP (%)",
+                            text="馬匹名稱", 
+                            hover_name="馬匹名稱",
+                            color_continuous_scale="Plasma",
+                            labels={"DSR_Days": "休息天數 (DSR)", "Alpha": "綜合動能 (Alpha)"},
+                            size_max=30
                         )
-                        st.altair_chart(rect + scatter_chart, use_container_width=True)
+                        
+                        # 優化文字位置與邊框
+                        fig_scatter.update_traces(
+                            textposition='top center', 
+                            textfont=dict(size=11, color='gray'),
+                            marker=dict(line=dict(width=1, color='DarkSlateGrey'))
+                        )
+                        
+                        # 加入 14-28 天的綠色黃金區間 (Golden Zone)
+                        max_y = scatter_df['Alpha'].max() + 10
+                        fig_scatter.add_vrect(
+                            x0=14, x1=28, 
+                            fillcolor="rgba(44, 160, 44, 0.15)", # 半透明綠色
+                            layer="below", 
+                            line_width=1.5, 
+                            line_dash="dash", 
+                            line_color="green", 
+                            annotation_text="黃金週期 (14-28天)", 
+                            annotation_position="top left",
+                            annotation_font_color="green"
+                        )
+                        
+                        fig_scatter.update_layout(
+                            height=400, 
+                            margin=dict(t=30, b=30, l=10, r=10),
+                            xaxis=dict(range=[-5, scatter_df['DSR_Days'].max() + 15]),
+                            yaxis=dict(range=[0, 105])
+                        )
+                        
+                        st.plotly_chart(fig_scatter, use_container_width=True)
                     else:
                         st.info("⚠️ 無法獲取有效日期進行體能週期計算。")
 
