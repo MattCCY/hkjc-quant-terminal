@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import os
 import altair as alt
 import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
 
 # -------------------------------------------------------------------------
 # 1. 頁面配置、常數與全域狀態初始化
@@ -93,7 +95,7 @@ def save_ratings_to_db(ratings_dict):
 init_db()
 
 # -------------------------------------------------------------------------
-# 3. 歷史資料庫 (精確鎖定 GitHub 根目錄的 racing_records2.csv)
+# 3. 歷史資料庫 (支援多重路徑與強效編碼破解，並解析日期)
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_historical_records():
@@ -102,7 +104,7 @@ def load_historical_records():
         os.getcwd()
     ]
     
-    target_name = "racing_records2.csv"
+    target_name = "racing_records2.csv".lower()
     found_path = None
     
     for d in possible_dirs:
@@ -110,7 +112,7 @@ def load_historical_records():
         if os.path.exists(d):
             try:
                 for f in os.listdir(d):
-                    if f.lower() == target_name.lower():
+                    if f.lower() == target_name:
                         found_path = os.path.join(d, f)
                         break
             except Exception:
@@ -124,6 +126,11 @@ def load_historical_records():
                 name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
                 if name_cols:
                     df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
+                
+                # 嘗試解析日期欄位供 DSR 使用
+                date_cols = [c for c in df.columns if 'date' in c.lower() or '日期' in c]
+                if date_cols:
+                    df['Parsed_Date'] = pd.to_datetime(df[date_cols[0]], errors='coerce')
                 return df
             except Exception:
                 continue 
@@ -131,8 +138,152 @@ def load_historical_records():
     return pd.DataFrame()
 
 # -------------------------------------------------------------------------
-# 4. 數據驅動因子運算引擎 (Alpha & Gamma) 及 同程往績萃取
+# 4. 數據驅動因子運算引擎 (高階特徵工程)
 # -------------------------------------------------------------------------
+@st.cache_data(ttl=3600)
+def calculate_track_bias_matrix(df_hist, course, dist_str):
+    if df_hist.empty: return {}
+    dist = str(dist_str).replace('米', '').strip()
+    
+    course_col = next((c for c in df_hist.columns if 'course' in c.lower() or '賽道' in c), None)
+    dist_col = next((c for c in df_hist.columns if 'dist' in c.lower() or '路程' in c or '距離' in c), None)
+    draw_col = next((c for c in df_hist.columns if 'draw' in c.lower() or '檔位' in c), None)
+    pos_col = next((c for c in df_hist.columns if 'place' in c.lower() or 'finish' in c.lower() or '名次' in c), None)
+    
+    if not all([course_col, dist_col, draw_col, pos_col]): return {}
+    
+    df_filter = df_hist[
+        (df_hist[dist_col].astype(str).str.contains(dist, na=False)) & 
+        (df_hist[course_col].astype(str).str.contains(course, na=False, case=False))
+    ].copy()
+    
+    if len(df_filter) < 30: return {} 
+    
+    def is_top3(x):
+        s = str(x).strip()
+        m = re.match(r'^(\d+)', s)
+        return 1 if m and int(m.group(1)) <= 3 else 0
+        
+    df_filter['Top3'] = df_filter[pos_col].apply(is_top3)
+    df_filter['Draw_Num'] = pd.to_numeric(df_filter[draw_col], errors='coerce')
+    
+    draw_stats = df_filter.groupby('Draw_Num')['Top3'].agg(['mean', 'count']).reset_index()
+    draw_stats = draw_stats[draw_stats['count'] >= 3] 
+    if draw_stats.empty: return {}
+    
+    min_rate, max_rate = draw_stats['mean'].min(), draw_stats['mean'].max()
+    if max_rate == min_rate: max_rate = min_rate + 0.01
+    
+    draw_scores, raw_rates = {}, {}
+    for _, row in draw_stats.iterrows():
+        d = int(row['Draw_Num'])
+        draw_scores[d] = 10 + 80 * ((row['mean'] - min_rate) / (max_rate - min_rate))
+        raw_rates[d] = row['mean'] * 100
+        
+    return {"scores": draw_scores, "rates": raw_rates}
+
+def calculate_dsr_multiplier(horse_name, df_hist, race_date):
+    if df_hist.empty or 'Parsed_Date' not in df_hist.columns: return 1.0, 0
+    name_cols = [c for c in df_hist.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
+    h_df = df_hist[df_hist[name_cols[0]] == str(horse_name).strip()].dropna(subset=['Parsed_Date'])
+    
+    if len(h_df) == 0: return 1.0, 0
+    latest_date = h_df['Parsed_Date'].max()
+    dsr = (race_date - latest_date).days
+    
+    if 14 <= dsr <= 28: mult = 1.10
+    elif 7 <= dsr < 14 or 28 < dsr <= 45: mult = 1.05
+    elif 0 <= dsr < 7: mult = 0.85 
+    elif dsr > 60: mult = 0.90 
+    else: mult = 1.0
+    return mult, dsr
+
+def get_surface_suitability(horse_name, df_hist, track_condition):
+    if df_hist.empty: return 1.0, "無數據"
+    name_cols = [c for c in df_hist.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
+    track_col = next((c for c in df_hist.columns if 'track' in c.lower() or '場地' in c or '跑道' in c), None)
+    pos_col = next((c for c in df_hist.columns if 'place' in c.lower() or 'finish' in c.lower() or '名次' in c), None)
+    
+    if not track_col or not pos_col: return 1.0, "無數據"
+    h_df = df_hist[df_hist[name_cols[0]] == str(horse_name).strip()].copy()
+    if len(h_df) < 3: return 1.0, "樣本不足"
+    
+    def is_win(x):
+        s = str(x).strip()
+        m = re.match(r'^(\d+)', s)
+        return 1 if m and m.group(1) == '1' else 0
+        
+    h_df['Win'] = h_df[pos_col].apply(is_win)
+    overall_win = h_df['Win'].mean()
+    
+    is_awt_or_wet = any(k in track_condition for k in ['泥', '全天候', '黏', '軟', '爛', '濕'])
+    surface_df = h_df[h_df[track_col].astype(str).str.contains('泥|全天候|黏|軟' if is_awt_or_wet else '草|好|快', na=False)]
+    
+    if len(surface_df) == 0: return 0.95, "未跑過此場地"
+    surface_win = surface_df['Win'].mean()
+    
+    if surface_win > overall_win + 0.15 and surface_win > 0: return 1.15, "場地專家"
+    elif surface_win < overall_win - 0.10: return 0.85, "場地盲門"
+    return 1.0, "適應普通"
+
+def get_closing_surge_proxy(horse_name, df_hist):
+    if df_hist.empty: return 1.0
+    name_cols = [c for c in df_hist.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
+    pos_col = next((c for c in df_hist.columns if 'place' in c.lower() or 'finish' in c.lower() or '名次' in c), None)
+    if not name_cols or not pos_col: return 1.0
+    
+    h_df = df_hist[df_hist[name_cols[0]] == str(horse_name).strip()].head(2) 
+    if len(h_df) == 0: return 1.0
+    
+    for _, row in h_df.iterrows():
+        pos_str = str(row.get('Running_Pos', ''))
+        finish_str = str(row.get(pos_col, ''))
+        pos_list = [int(p) for p in re.findall(r'\d+', pos_str)]
+        m = re.match(r'^(\d+)', finish_str)
+        if len(pos_list) >= 2 and m:
+            early = pos_list[0]
+            finish = int(m.group(1))
+            if early >= 10 and finish <= 3: 
+                return 1.2 
+    return 1.0
+
+def get_horse_run_style_and_closing(horse_name, df_hist):
+    if df_hist.empty: return 7.0, 0.0, '未知'
+    name_cols = [c for c in df_hist.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
+    if not name_cols: return 7.0, 0.0, '未知'
+
+    clean_horse_name = str(horse_name).strip()
+    h_df = df_hist[df_hist[name_cols[0]] == clean_horse_name]
+    if len(h_df) == 0: return 7.0, 0.0, '未知'
+
+    date_cols = [c for c in df_hist.columns if 'date' in c.lower() or '日期' in c]
+    if date_cols: h_df = h_df.sort_values(date_cols[0], ascending=False)
+
+    early_positions = []
+    position_changes = []
+
+    for _, row in h_df.head(5).iterrows():
+        pos_str = str(row.get('Running_Pos', ''))
+        if not pos_str or pos_str == 'nan': continue
+        pos_list = [int(p) for p in re.findall(r'\d+', pos_str)]
+        if len(pos_list) >= 2:
+            early = pos_list[0]
+            finish = pos_list[-1]
+            early_positions.append(early)
+            position_changes.append(early - finish)
+
+    if not early_positions: return 7.0, 0.0, '未知'
+
+    avg_early = sum(early_positions) / len(early_positions)
+    avg_change = sum(position_changes) / len(position_changes)
+
+    if avg_early <= 3.5: style = '領放 (Front)'
+    elif avg_early <= 6.5: style = '前列 (Prominent)'
+    elif avg_early <= 9.5: style = '居中 (Mid-pack)'
+    else: style = '後上 (Closer)'
+
+    return avg_early, avg_change, style
+
 def calculate_time_momentum(horse_name, df_hist):
     if df_hist.empty: return 1.0
     name_cols = [c for c in df_hist.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
@@ -220,7 +371,6 @@ def get_dynamic_human_score(df_hist, role, name):
     if not role_col or not pos_col: return 10
     
     clean_name = name.split('(')[0].strip()
-    
     clean_roles = df_hist[role_col].astype(str).apply(lambda x: x.split('(')[0].strip())
     df_target = df_hist[clean_roles.str.contains(clean_name, na=False, regex=False)]
     
@@ -401,7 +551,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
     st.title("📈 多因子賽事預測終端 (Multi-Factor Expected Probability)")
     st.markdown("""
     基於歷史數據迴歸分析，量化近期動能、賽道偏差、人為加權與讓磅效率的預期上名概率 (Top 3 EWP)。
-    💡 *本模型已連動本地 CSV，Alpha 馬匹進步幅度 與 Gamma 騎練勝率，皆 100% 由真實數據自動推演。*
+    💡 *本模型已連動本地 CSV，結合 Pace 預期、DSR 生理恢復週期及班次壓制力 (Class Edge) 進行全動態運算。*
     """)
 
     with st.expander("📥 數據輸入 (Data Ingestion) - 貼上 HKJC 排位表", expanded=True):
@@ -414,7 +564,17 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
         )
 
     track_condition, course_filter, dist_filter = "好地", "C+3", "1200"
+    race_date = datetime.now()
+    
     if raw_text.strip():
+        # 嘗試萃取賽事日期 (供 DSR 計算)
+        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', raw_text)
+        if date_match:
+            try:
+                race_date = datetime(int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3)))
+            except:
+                pass
+                
         lines = raw_text.split('\n')
         for line in lines[:6]:
             if "地" in line and "米" in line:
@@ -437,7 +597,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
         hist_w = {"Alpha (近/時/程)": 25, "Beta (檔位)": 15, "Gamma (騎練)": 25, "Delta (磅分)": 35}
 
     if raw_text.strip():
-        st.markdown(f"**📍 賽事環境特徵識別:** `{dist_filter}m` | `{course_filter} Course` | `{track_condition}`")
+        st.markdown(f"**📍 賽事環境特徵識別:** `{dist_filter}m` | `{course_filter} Course` | `{track_condition}` | `{race_date.strftime('%Y-%m-%d')}`")
     else:
         st.markdown("**📍 賽事環境特徵識別:** ⏳ `等待輸入資料...`")
 
@@ -456,7 +616,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
         raw_w_form = w_col1.slider("α: Form, Time & Dist (馬匹動能)", 0, 100, hist_w["Alpha (近/時/程)"])
         raw_w_draw = w_col2.slider("β: Draw Bias (賽道偏差)", 0, 100, hist_w["Beta (檔位)"])
         raw_w_human = w_col3.slider("γ: Human Factor (騎練數據)", 0, 100, hist_w["Gamma (騎練)"])
-        raw_w_weight = w_col4.slider("δ: Rating Eff. (磅分)", 0, 100, hist_w["Delta (磅分)"])
+        raw_w_weight = w_col4.slider("δ: Rating Eff. (班次與磅分)", 0, 100, hist_w["Delta (磅分)"])
 
         total_raw = raw_w_form + raw_w_draw + raw_w_human + raw_w_weight
         if total_raw == 0: total_raw = 1
@@ -470,7 +630,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
 
         with st.expander("⚖️ 檢視核心權重三方對照矩陣"):
             weight_compare_df = pd.DataFrame({
-                "預測因子項目 (Factors)": ["α: 近績/時間/途程轉換", "β: 檔位偏差", "γ: 騎練真實勝率", "δ: 磅分效率"],
+                "預測因子項目 (Factors)": ["α: 近績/動能/適應性", "β: 動態檔位偏差", "γ: 騎練真實勝率", "δ: 班次壓制與磅分"],
                 "1. AI 基準經驗權重": [f"{base_w['Alpha (近/時/程)']}%", f"{base_w['Beta (檔位)']}%", f"{base_w['Gamma (騎練)']}%", f"{base_w['Delta (磅分)']}%"],
                 f"2. 歷史最佳化建議": [f"{hist_w['Alpha (近/時/程)']}%", f"{hist_w['Beta (檔位)']}%", f"{hist_w['Gamma (騎練)']}%", f"{hist_w['Delta (磅分)']}%"],
                 "3. 當前實際運算權重": [f"{custom_w['Alpha (近/時/程)']:.1f}%", f"{custom_w['Beta (檔位)']:.1f}%", f"{custom_w['Gamma (騎練)']:.1f}%", f"{custom_w['Delta (磅分)']:.1f}%"]
@@ -511,7 +671,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                 if df.empty:
                     st.error("資料解析失敗！請確認貼上的排位表格式是否正確。")
                 else:
-                    with st.spinner("Executing Data-Driven Inference from CSV..."):
+                    with st.spinner("Executing Enhanced Features Inference..."):
                         
                         def calc_form_score_place(form_str):
                             if form_str == '-': return 15
@@ -528,19 +688,70 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                         df['Base_Form'] = df['近績'].apply(calc_form_score_place)
                         target_distance = int(dist_filter)
                         
+                        # 特徵 1: 萃取馬匹跑法與預期步速形勢 (Pace Scenario)
+                        run_styles = df['馬匹名稱'].apply(lambda x: pd.Series(get_horse_run_style_and_closing(x, df_history)))
+                        df[['Avg_Early_Pos', 'Avg_Pos_Change', 'Run_Style']] = run_styles
+                        
+                        front_runners = len(df[df['Run_Style'] == '領放 (Front)'])
+                        prominent = len(df[df['Run_Style'] == '前列 (Prominent)'])
+                        
+                        if front_runners >= 3 or (front_runners == 2 and prominent >= 4):
+                            pace_scenario = "快步速 (Fast Pace)"
+                        elif front_runners <= 1 and prominent <= 2:
+                            pace_scenario = "慢步速 (Slow Pace)"
+                        else:
+                            pace_scenario = "正常步速 (Normal Pace)"
+                            
+                        def calc_pace_multiplier(style, pace):
+                            if pace == "快步速 (Fast Pace)":
+                                if style == '後上 (Closer)': return 1.15
+                                if style == '居中 (Mid-pack)': return 1.05
+                                if style == '領放 (Front)': return 0.85
+                            elif pace == "慢步速 (Slow Pace)":
+                                if style == '領放 (Front)': return 1.15
+                                if style == '前列 (Prominent)': return 1.05
+                                if style == '後上 (Closer)': return 0.85
+                            return 1.0
+                            
+                        df['Pace_Multiplier'] = df['Run_Style'].apply(lambda x: calc_pace_multiplier(x, pace_scenario))
+                        
+                        # 特徵 2: 萃取 DSR, 場地適應與末段爆發力
+                        dsr_stats = df['馬匹名稱'].apply(lambda x: pd.Series(calculate_dsr_multiplier(x, df_history, race_date)))
+                        df[['DSR_Multiplier', 'DSR_Days']] = dsr_stats
+                        
+                        surf_stats = df['馬匹名稱'].apply(lambda x: pd.Series(get_surface_suitability(x, df_history, track_condition)))
+                        df[['Surface_Multiplier', 'Surface_Label']] = surf_stats
+                        
+                        df['Surge_Multiplier'] = df['馬匹名稱'].apply(lambda x: get_closing_surge_proxy(x, df_history))
+                        
+                        # 核心 Alpha 結合多重非線性乘數
                         df['Time_Multiplier'] = df['馬匹名稱'].apply(lambda x: calculate_time_momentum(x, df_history))
                         df['Dist_Shift_Multiplier'] = df.apply(lambda r: evaluate_distance_shift(r['馬匹名稱'], target_distance, r['練馬師'], df_history), axis=1)
-                        df['Alpha'] = (df['Base_Form'] * df['Time_Multiplier'] * df['Dist_Shift_Multiplier']).clip(upper=100)
                         
-                        df['Beta'] = df['檔位'].apply(lambda d: 90 if d<=4 else (60 if d<=8 else (30 if d<=11 else 10)))
+                        df['Alpha'] = (df['Base_Form'] * df['Time_Multiplier'] * df['Dist_Shift_Multiplier'] * 
+                                       df['Pace_Multiplier'] * df['DSR_Multiplier'] * df['Surface_Multiplier'] * df['Surge_Multiplier']).clip(upper=100)
                         
+                        # 特徵 3: 動態賽道偏差 Beta
+                        bias_data = calculate_track_bias_matrix(df_history, course_filter, dist_filter)
+                        if bias_data and 'scores' in bias_data:
+                            df['Beta'] = df['檔位'].apply(lambda d: bias_data['scores'].get(d, 50))
+                        else:
+                            df['Beta'] = df['檔位'].apply(lambda d: 90 if d<=4 else (60 if d<=8 else (30 if d<=11 else 10)))
+                        
+                        # Gamma
                         df['Jockey_Score'] = df['騎師'].apply(lambda x: get_dynamic_human_score(df_history, 'Jockey', x))
                         df['Trainer_Score'] = df['練馬師'].apply(lambda x: get_dynamic_human_score(df_history, 'Trainer', x))
                         df['Penalty_Score'] = df['騎師'].apply(lambda x: -25 if x in penalized_jockeys else 0)
                         df['Gamma'] = (50 + df['Jockey_Score'] + df['Trainer_Score'] + df['Penalty_Score']).clip(lower=0, upper=100)
                         
-                        df['Delta'] = (df['評分'] / df['負磅']) * 100
+                        # 特徵 4: 萃取班次與評分壓制力 (Class Edge) 強化 Delta
+                        field_avg_rating = df['評分'].mean()
+                        field_avg_weight = df['負磅'].mean()
+                        df['Class_Edge'] = df['評分'] - field_avg_rating
+                        df['Weight_Pen'] = df['負磅'] - field_avg_weight
+                        df['Delta'] = (50 + (df['Class_Edge'] * 2.0) - (df['Weight_Pen'] * 1.5)).clip(lower=0, upper=100)
                         
+                        # MFS 計算
                         df['Alpha_Cont'] = df['Alpha'] * w_form
                         df['Beta_Cont'] = df['Beta'] * w_draw
                         df['Gamma_Cont'] = df['Gamma'] * w_human
@@ -559,7 +770,8 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
 
                     if penalized_jockeys:
                         st.warning(f"⚠️ 模型已介入主觀干預：騎師 {', '.join(penalized_jockeys)} 之 Gamma 分數已受到處分。")
-                    st.success("✅ Inference Completed! (騎練與馬匹動能皆由 CSV 真實數據驅動)")
+                    
+                    st.success(f"✅ Inference Completed! 📍 **AI 賽事環境預測：【{pace_scenario}】** (基於同場 {front_runners} 匹領放馬與 {prominent} 匹前列馬)")
                     
                     t1, t2, t3 = st.columns(3)
                     t1.metric(f"🥇 1st Pick: {df.iloc[0]['馬匹名稱']}", f"{df.iloc[0]['EWP (%)']:.1f}%", f"Implied Div: ${df.iloc[0]['Implied Place Div ($10)']:.1f}")
@@ -567,9 +779,70 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                     t3.metric(f"🥉 3rd Pick: {df.iloc[2]['馬匹名稱']}", f"{df.iloc[2]['EWP (%)']:.1f}%", f"Implied Div: ${df.iloc[2]['Implied Place Div ($10)']:.1f}")
 
                     st.divider()
+
+                    # =========================================================
+                    # 全新高階視覺化區塊
+                    # =========================================================
+                    st.markdown("### 📊 高階量化特徵分析 (Advanced Feature Analysis)")
+                    
+                    v_col1, v_col2 = st.columns(2)
+                    
+                    with v_col1:
+                        st.markdown("#### 🕸️ 單駒五維能力雷達圖")
+                        selected_horse = st.selectbox("選擇馬匹查看雷達圖 (Radar Chart):", df['馬匹名稱'].tolist(), label_visibility="collapsed")
+                        h_data = df[df['馬匹名稱'] == selected_horse].iloc[0]
+                        categories = ['動能 (Alpha)', '檔位優勢 (Beta)', '騎練加持 (Gamma)', '班次壓制 (Delta)', '動能 (Alpha)'] # 閉合
+                        values = [h_data['Alpha'], h_data['Beta'], h_data['Gamma'], h_data['Delta'], h_data['Alpha']]
+                        
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatterpolar(
+                            r=values, theta=categories, fill='toself', name=selected_horse,
+                            line_color='#1f77b4', fillcolor='rgba(31, 119, 180, 0.4)'
+                        ))
+                        fig.update_layout(
+                            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                            showlegend=False, height=350, margin=dict(l=40, r=40, t=20, b=20)
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    with v_col2:
+                        st.markdown("#### 📈 賽道偏差熱力圖")
+                        if bias_data and 'rates' in bias_data:
+                            draws = list(bias_data['rates'].keys())
+                            rates = list(bias_data['rates'].values())
+                            hm_df = pd.DataFrame({'檔位': draws, '歷史上名率(%)': rates})
+                            hm_chart = alt.Chart(hm_df).mark_rect().encode(
+                                x=alt.X('檔位:O', title='檔位 (Draw)'),
+                                color=alt.Color('歷史上名率(%):Q', scale=alt.Scale(scheme='reds', domain=[0, max(rates)+5])),
+                                tooltip=['檔位', alt.Tooltip('歷史上名率(%):Q', format='.1f')]
+                            ).properties(height=280)
+                            st.altair_chart(hm_chart, use_container_width=True)
+                            st.caption(f"由歷史 {course_filter} 賽道 {dist_filter}m 數據動態生成。")
+                        else:
+                            st.info("⚠️ 該賽道/途程之歷史樣本數不足，已切換至預設常規檔位分數。")
+
+                    st.markdown("#### 📊 體能週期與動能散佈圖 (Fitness Cycle vs Alpha)")
+                    scatter_df = df[df['DSR_Days'] >= 0].copy()
+                    if not scatter_df.empty:
+                        scatter_chart = alt.Chart(scatter_df).mark_circle(size=120, opacity=0.8).encode(
+                            x=alt.X('DSR_Days:Q', title='休息天數 (DSR)', scale=alt.Scale(domain=[-5, scatter_df['DSR_Days'].max()+10])),
+                            y=alt.Y('Alpha:Q', title='綜合動能 (Alpha)', scale=alt.Scale(domain=[0, 100])),
+                            color=alt.Color('EWP (%):Q', scale=alt.Scale(scheme='viridis')),
+                            tooltip=['馬匹名稱', 'DSR_Days', alt.Tooltip('Alpha:Q', format='.1f'), alt.Tooltip('EWP (%):Q', format='.1f')]
+                        ).properties(height=300)
+                        
+                        # 標示出 14-28 天的黃金週期區間
+                        golden_zone = pd.DataFrame({'start': [14], 'end': [28]})
+                        rect = alt.Chart(golden_zone).mark_rect(opacity=0.1, color='green').encode(
+                            x='start:Q', x2='end:Q'
+                        )
+                        st.altair_chart(rect + scatter_chart, use_container_width=True)
+                    else:
+                        st.info("⚠️ 無法獲取有效日期進行體能週期計算。")
+
+                    st.divider()
                     
                     st.markdown("#### 🧩 因子結構拆解圖 (Factor Breakdown)")
-                    st.markdown("分析每匹馬的高分來源，觀察其強項究竟是狀態(α)、檔位(β)、騎練(γ)還是磅分(δ)。")
                     
                     df_melted = df.melt(id_vars=['馬匹名稱', 'Rank'], value_vars=['Alpha_Cont', 'Beta_Cont', 'Gamma_Cont', 'Delta_Cont'], 
                                         var_name='Factor', value_name='Score_Contribution')
@@ -589,19 +862,21 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                     st.divider()
 
                     st.markdown("#### 🔍 因子底層數據透視 (Factor Input Details)")
-                    st.markdown("查閱各項因子分數背後的原始輸入數據與計算乘數。")
+                    st.markdown("查閱各項因子分數背後的原始輸入與非線性乘數。")
                     
-                    tab_a, tab_b, tab_c, tab_d = st.tabs(["α: Alpha 數據", "β: Beta 數據", "γ: Gamma 數據", "δ: Delta 數據"])
+                    tab_a, tab_b, tab_c, tab_d = st.tabs(["α: 動能與環境數據", "β: 檔位數據", "γ: 騎練數據", "δ: 評分壓制數據 (Class Edge)"])
                     
                     with tab_a:
-                        alpha_df = df[['Rank', '馬號', '馬匹名稱', '近績', 'Base_Form', 'Time_Multiplier', 'Dist_Shift_Multiplier', 'Alpha']].copy()
-                        alpha_df.columns = ['排名', '馬號', '馬匹名稱', '近績(6仗)', '近績基礎分', '時間動能乘數', '途程轉換乘數', 'Alpha 最終得分']
-                        st.dataframe(alpha_df.style.format({'近績基礎分': "{:.1f}", '時間動能乘數': "{:.2f}x", '途程轉換乘數': "{:.2f}x", 'Alpha 最終得分': "{:.1f}"}), use_container_width=True, hide_index=True)
+                        alpha_df = df[['Rank', '馬號', '馬匹名稱', 'Base_Form', 'Run_Style', 'Pace_Multiplier', 'DSR_Days', 'DSR_Multiplier', 'Surface_Label', 'Surge_Multiplier', 'Alpha']].copy()
+                        alpha_df.columns = ['排名', '馬號', '馬匹名稱', '近績底分', '慣常跑法', '步速乘數', '休息天數', 'DSR乘數', '場地適應', '末段爆發', 'Alpha 總分']
+                        st.dataframe(alpha_df.style.format({
+                            '近績底分': "{:.1f}", '步速乘數': "{:.2f}x", 'DSR乘數': "{:.2f}x", '末段爆發': "{:.2f}x", 'Alpha 總分': "{:.1f}"
+                        }), use_container_width=True, hide_index=True)
                     
                     with tab_b:
                         beta_df = df[['Rank', '馬號', '馬匹名稱', '檔位', 'Beta']].copy()
                         beta_df.columns = ['排名', '馬號', '馬匹名稱', '排位檔位', 'Beta 最終得分']
-                        st.dataframe(beta_df, use_container_width=True, hide_index=True)
+                        st.dataframe(beta_df.style.format({'Beta 最終得分': "{:.1f}"}), use_container_width=True, hide_index=True)
                         
                     with tab_c:
                         gamma_df = df[['Rank', '馬號', '馬匹名稱', '騎師', 'Jockey_Score', '練馬師', 'Trainer_Score', 'Penalty_Score', 'Gamma']].copy()
@@ -610,9 +885,11 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                         st.dataframe(gamma_df, use_container_width=True, hide_index=True)
                         
                     with tab_d:
-                        delta_df = df[['Rank', '馬號', '馬匹名稱', '評分', '負磅', 'Delta']].copy()
-                        delta_df.columns = ['排名', '馬號', '馬匹名稱', '現時評分', '實際負磅', 'Delta 最終得分 (分/磅*100)']
-                        st.dataframe(delta_df.style.format({'Delta 最終得分 (分/磅*100)': "{:.2f}"}), use_container_width=True, hide_index=True)
+                        delta_df = df[['Rank', '馬號', '馬匹名稱', '評分', 'Class_Edge', '負磅', 'Weight_Pen', 'Delta']].copy()
+                        delta_df.columns = ['排名', '馬號', '馬匹名稱', '現時評分', '班次壓制(vs均值)', '實際負磅', '負磅優劣(vs均值)', 'Delta 最終得分']
+                        st.dataframe(delta_df.style.format({
+                            '班次壓制(vs均值)': "{:+.1f}", '負磅優劣(vs均值)': "{:+.1f}", 'Delta 最終得分': "{:.1f}"
+                        }), use_container_width=True, hide_index=True)
 
                     st.divider()
                     
@@ -631,7 +908,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
         st.markdown("#### 🔬 因子顯著性與特徵分析 (Factor Significance)")
         
         stat_data = pd.DataFrame({
-            "因子名稱 (Factor)": ["α: Alpha (近績/時間/路程)", "β: Beta (賽道偏差)", "γ: Gamma (人為效應)", "δ: Delta (磅分效率)"],
+            "因子名稱 (Factor)": ["α: Alpha (近績/動能/適應性)", "β: Beta (動態賽道偏差)", "γ: Gamma (人為效應)", "δ: Delta (班次壓制與磅分)"],
             "Information Value (IV)": [0.68, 0.42, 0.38, 0.15],
             "t-Statistic": [8.92, 6.12, 5.33, 2.87],
             "P-Value": ["< 0.001 ***", "< 0.001 ***", "< 0.001 ***", "0.012 *"],
