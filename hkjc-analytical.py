@@ -554,8 +554,6 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                         safe_prob = df['EWP (%)'].replace(0, 0.001) / 100
                         df['Implied Place Div ($10)'] = ((10 * 0.835) / safe_prob).clip(lower=10.1)
                         
-                        df['AI_Commentary'] = df.apply(generate_horse_commentary, axis=1)
-                        
                         df = df.sort_values('EWP (%)', ascending=False).reset_index(drop=True)
                         df['Rank'] = df.index + 1
 
@@ -588,42 +586,17 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                     
                     st.altair_chart(breakdown_chart, use_container_width=True)
 
-                    st.markdown(f"#### 📖 同程往績檢閱 (History at {dist_filter}m)")
-                    st.markdown("從 CSV 資料庫中萃取各駒過往在相同途程下的出賽紀錄，供您客觀評估其路程適應性。")
-                    
-                    if not history_df.empty:
-                        # 選擇要顯示的欄位並重新命名
-                        display_history_df = df[['Rank', '馬號', '馬匹名稱', 'EWP (%)', '同程出賽次數', '最佳名次', '最近一次同程日期', '同程戰績摘要 (名次)']].copy()
-                        display_history_df['EWP (%)'] = display_history_df['EWP (%)'].map("{:.1f}%".format)
-                        
-                        st.dataframe(
-                        commentary_df, 
-                        column_config={
-                            "Rank": "排名",
-                            "馬號": "馬號",
-                            "馬匹名稱": "馬名",
-                            "EWP (%)": "預期勝率",
-                            "AI_Commentary": st.column_config.TextColumn("AI 綜合點評", width="large")
-                        },
-                        use_container_width=True, hide_index=True
-                    )
-
                     st.divider()
 
                     st.markdown("#### 🔍 因子底層數據透視 (Factor Input Details)")
                     st.markdown("查閱各項因子分數背後的原始輸入數據與計算乘數。")
                     
                     tab_a, tab_b, tab_c, tab_d = st.tabs(["α: Alpha 數據", "β: Beta 數據", "γ: Gamma 數據", "δ: Delta 數據"])
-
-                    st.markdown("#### 🔍 因子底層數據透視 (Factor Input Details)")
-                    st.markdown("查閱各項因子分數背後的原始輸入數據與計算乘數。")
-                    
-                    tab_a, tab_b, tab_c, tab_d = st.tabs(["α: 動能與步速數據", "β: 檔位數據", "γ: 騎練數據", "δ: 評分壓制數據 (Class Edge)"])
                     
                     with tab_a:
-                        alpha_df = df[['Rank', '馬號', '馬匹名稱', 'Run_Style', 'Pace_Multiplier', 'Time_Multiplier', 'Dist_Shift_Multiplier', 'Alpha']].copy()
-                        alpha_df.columns = ['排名', '馬號', '馬匹名稱', '慣常跑法', '預期步速乘數', '時間動能乘數', '途程轉換乘數', 'Alpha 最終得分']
-                        st.dataframe(alpha_df.style.format({'預期步速乘數': "{:.2f}x", '時間動能乘數': "{:.2f}x", '途程轉換乘數': "{:.2f}x", 'Alpha 最終得分': "{:.1f}"}), use_container_width=True, hide_index=True)
+                        alpha_df = df[['Rank', '馬號', '馬匹名稱', '近績', 'Base_Form', 'Time_Multiplier', 'Dist_Shift_Multiplier', 'Alpha']].copy()
+                        alpha_df.columns = ['排名', '馬號', '馬匹名稱', '近績(6仗)', '近績基礎分', '時間動能乘數', '途程轉換乘數', 'Alpha 最終得分']
+                        st.dataframe(alpha_df.style.format({'近績基礎分': "{:.1f}", '時間動能乘數': "{:.2f}x", '途程轉換乘數': "{:.2f}x", 'Alpha 最終得分': "{:.1f}"}), use_container_width=True, hide_index=True)
                     
                     with tab_b:
                         beta_df = df[['Rank', '馬號', '馬匹名稱', '檔位', 'Beta']].copy()
@@ -637,9 +610,9 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                         st.dataframe(gamma_df, use_container_width=True, hide_index=True)
                         
                     with tab_d:
-                        delta_df = df[['Rank', '馬號', '馬匹名稱', '評分', 'Class_Edge', '負磅', 'Weight_Pen', 'Delta']].copy()
-                        delta_df.columns = ['排名', '馬號', '馬匹名稱', '現時評分', '評分差距 (vs 均值)', '實際負磅', '負磅差距 (vs 均值)', 'Delta 最終得分']
-                        st.dataframe(delta_df.style.format({'評分差距 (vs 均值)': "{:+.1f}", '負磅差距 (vs 均值)': "{:+.1f}", 'Delta 最終得分': "{:.1f}"}), use_container_width=True, hide_index=True)
+                        delta_df = df[['Rank', '馬號', '馬匹名稱', '評分', '負磅', 'Delta']].copy()
+                        delta_df.columns = ['排名', '馬號', '馬匹名稱', '現時評分', '實際負磅', 'Delta 最終得分 (分/磅*100)']
+                        st.dataframe(delta_df.style.format({'Delta 最終得分 (分/磅*100)': "{:.2f}"}), use_container_width=True, hide_index=True)
 
                     st.divider()
                     
