@@ -93,27 +93,39 @@ def save_ratings_to_db(ratings_dict):
 init_db()
 
 # -------------------------------------------------------------------------
-# 3. 歷史資料庫 (多重路徑探索器，解決無法載入問題)
+# 3. 歷史資料庫 (強化版讀取器)
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_historical_records():
-    possible_paths = [
-        "racing_records2.csv",
-        os.path.join(os.getcwd(), "racing_records2.csv"),
-        os.path.join(os.path.dirname(__file__), "racing_records2.csv")
-    ]
+    # 確保路徑是以當前腳本所在的目錄為基準
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(base_dir, "racing_records2.csv")
     
-    for path in possible_paths:
-        if os.path.exists(path):
-            try:
-                df = pd.read_csv(path)
-                name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
-                if name_cols:
-                    df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
-                return df
-            except Exception:
-                continue
-    return pd.DataFrame()
+    if os.path.exists(csv_path):
+        try:
+            df = pd.read_csv(csv_path)
+            # 清洗馬名字串，確保後續比對不會因為空白字元出錯
+            name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
+            if name_cols:
+                df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
+            return df
+        except Exception as e:
+            st.sidebar.error(f"讀取 CSV 時發生錯誤: {e}")
+            return pd.DataFrame()
+    else:
+        # 備用路徑尋找 (針對某些雲端部署環境)
+        fallback_path = "racing_records2.csv"
+        if os.path.exists(fallback_path):
+             try:
+                 df = pd.read_csv(fallback_path)
+                 name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
+                 if name_cols:
+                     df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
+                 return df
+             except Exception:
+                 pass
+        
+        return pd.DataFrame()
 
 # -------------------------------------------------------------------------
 # 4. 數據驅動因子運算引擎 (Alpha & Gamma)
@@ -196,37 +208,29 @@ def evaluate_distance_shift(horse_name, target_dist, trainer_name, df_hist):
     return multiplier
 
 def get_dynamic_human_score(df_hist, role, name):
-    """
-    從 CSV 實時計算騎師/練馬師近 30 仗的真實勝率，完全取代人工寫死的強弱名單！
-    role: 'Jockey' 或是 'Trainer'
-    """
-    if df_hist.empty: return 10 # 預設分數
+    if df_hist.empty: return 10 
     
-    # 自動尋找 CSV 中對應的欄位
     role_col = next((c for c in df_hist.columns if role.lower() in c.lower() or ('騎' in c if role=='Jockey' else '練' in c)), None)
     pos_col = next((c for c in df_hist.columns if 'place' in c.lower() or 'finish' in c.lower() or '名次' in c), None)
     date_col = next((c for c in df_hist.columns if 'date' in c.lower() or '日期' in c), None)
     
     if not role_col or not pos_col: return 10
     
-    # 清洗姓名 (去除 "潘頓(P)" 中的括號)
     clean_name = name.split('(')[0].strip()
     
-    # 篩選該人的出賽紀錄
+    # 防呆處理：確保欄位都是字串型態才能使用 str.contains
     df_hist['temp_clean_role'] = df_hist[role_col].astype(str).apply(lambda x: x.split('(')[0].strip())
-    df_target = df_hist[df_hist['temp_clean_role'].str.contains(clean_name, na=False)]
+    df_target = df_hist[df_hist['temp_clean_role'].str.contains(clean_name, na=False, regex=False)]
     
-    if len(df_target) == 0: return 5 # 缺乏數據視為弱勢
+    if len(df_target) == 0: return 5 
     
-    # 排序確保抓取最新 30 仗
     if date_col:
         df_target = df_target.sort_values(date_col, ascending=False)
     else:
-        df_target = df_target.iloc[::-1] # 假設 CSV 底部為最新
+        df_target = df_target.iloc[::-1] 
         
     df_recent = df_target.head(30)
     
-    # 計算實質勝率
     def is_win(x):
         s = str(x).strip()
         return 1 if s == '1' else 0
@@ -236,15 +240,15 @@ def get_dynamic_human_score(df_hist, role, name):
     
     score = 0
     if role == 'Jockey':
-        if win_rate > 0.15: score = 25       # 手風極順
-        elif win_rate > 0.08: score = 15     # 狀態良好
-        elif win_rate < 0.04: score = -10    # 狀態低迷
-        else: score = 5                      # 平庸
+        if win_rate > 0.15: score = 25       
+        elif win_rate > 0.08: score = 15     
+        elif win_rate < 0.04: score = -10    
+        else: score = 5                      
     elif role == 'Trainer':
-        if win_rate > 0.12: score = 20       # 馬房當銳
-        elif win_rate > 0.08: score = 10     # 馬房穩定
-        elif win_rate < 0.03: score = -15    # 馬房低迷(可能減分中)
-        else: score = 5                      # 平庸
+        if win_rate > 0.12: score = 20       
+        elif win_rate > 0.08: score = 10     
+        elif win_rate < 0.03: score = -15    
+        else: score = 5                      
         
     return score
 
@@ -396,6 +400,15 @@ else:
             st.code("\n".join(files))
         except Exception as e:
             st.write(f"無法讀取目錄: {e}")
+
+APP_PAGES = [
+    "📊 多因子賽前推演 (Multi-Factor Inference)", 
+    "🐎 練馬師資產分佈 (Stable Assets)", 
+    "🔍 單駒深度預測 (開發中)"
+]
+selected_page = st.sidebar.radio("Module Selection：", APP_PAGES)
+st.sidebar.divider()
+
 # =========================================================================
 # 模組 A：多因子賽前推演
 # =========================================================================
@@ -537,7 +550,7 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                         
                         df['Beta'] = df['檔位'].apply(lambda d: 90 if d<=4 else (60 if d<=8 else (30 if d<=11 else 10)))
                         
-                        # 💡 Gamma 動態數據：直接從 CSV 讀取騎師與練馬師勝率
+                        # Gamma 動態數據：直接從 CSV 讀取騎師與練馬師勝率
                         df['Jockey_Score'] = df['騎師'].apply(lambda x: get_dynamic_human_score(df_history, 'Jockey', x))
                         df['Trainer_Score'] = df['練馬師'].apply(lambda x: get_dynamic_human_score(df_history, 'Trainer', x))
                         df['Penalty_Score'] = df['騎師'].apply(lambda x: -25 if x in penalized_jockeys else 0)
