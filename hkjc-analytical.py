@@ -93,7 +93,7 @@ def save_ratings_to_db(ratings_dict):
 init_db()
 
 # -------------------------------------------------------------------------
-# 3. 歷史資料庫：完成時間與途程轉換引擎
+# 3. 歷史資料庫：完成時間與途程轉換引擎 (依賴 CSV)
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_historical_records():
@@ -172,6 +172,7 @@ def evaluate_distance_shift(horse_name, target_dist, trainer_name, df_hist):
     return multiplier
 
 def get_trainer_dynamic_score(trainer_name, df_hist):
+    # 這裡未來可改成從 df_hist 動態查詢 30 天勝率
     top_trainers = ['伍鵬志', '呂健威', '蔡約翰', '告東尼', '大衛希斯', '方嘉柏']
     long_term_strong = trainer_name in top_trainers
     purple_patch_trainers = ['廖康銘', '巫偉傑', '呂健威']
@@ -183,7 +184,7 @@ def get_trainer_dynamic_score(trainer_name, df_hist):
     return score
 
 # -------------------------------------------------------------------------
-# 4. 基本爬蟲模組
+# 4. 基本爬蟲模組 (馬會即時資料)
 # -------------------------------------------------------------------------
 def fetch_single_horse_details(brand_no, full_id):
     url = f"https://racing.hkjc.com/racing/information/Chinese/Horse/Horse.aspx?HorseId={full_id}"
@@ -293,7 +294,7 @@ def custom_opacity_styler(s):
     return styles
 
 # -------------------------------------------------------------------------
-# 5. AI 質化點評生成器 (Qualitative Commentary Engine)
+# 5. AI 質化點評生成器
 # -------------------------------------------------------------------------
 def generate_horse_commentary(row):
     comments = []
@@ -464,7 +465,6 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                             weights = [1.5, 1.2, 1.0, 0.8, 0.5, 0.5][:len(scores)]
                             return sum(s*wt for s, wt in zip(scores, weights)) / sum(weights)
                         
-                        # 💡 拆解各項因子的底層貢獻，儲存入 df 中
                         df['Base_Form'] = df['近績'].apply(calc_form_score_place)
                         target_distance = int(dist_filter)
                         df['Time_Multiplier'] = df['馬匹名稱'].apply(lambda x: calculate_time_momentum(x, df_history))
@@ -546,7 +546,6 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
 
                     st.divider()
 
-                    # --- 新增功能區塊：底層數據透視 (Transparency Subtabs) ---
                     st.markdown("#### 🔍 因子底層數據透視 (Factor Input Details)")
                     st.markdown("查閱各項因子分數背後的原始輸入數據與計算乘數。")
                     
