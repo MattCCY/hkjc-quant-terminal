@@ -383,18 +383,19 @@ st.sidebar.title("🧭 Quant Terminal")
 
 df_history = load_historical_records()
 if not df_history.empty:
-    st.sidebar.success(f"🗄️ CSV 載入成功: {len(df_history)} 筆賽績\n\n(騎練狀態將由此數據庫動態運算)")
+    st.sidebar.success(f"🗄️ CSV 載入成功: {len(df_history)} 筆賽績\n\n(騎練與動能狀態將由此動態運算)")
 else:
-    st.sidebar.error("⚠️ 警告：無法載入 racing_records2.csv，所有動能因子將失效，請檢查 GitHub 檔案。")
-
-APP_PAGES = [
-    "📊 多因子賽前推演 (Multi-Factor Inference)", 
-    "🐎 練馬師資產分佈 (Stable Assets)", 
-    "🔍 單駒深度預測 (開發中)"
-]
-selected_page = st.sidebar.radio("Module Selection：", APP_PAGES)
-st.sidebar.divider()
-
+    st.sidebar.error("⚠️ 警告：無法載入 racing_records2.csv，動能因子失效。")
+    
+    # 開發者除錯面板：看看雲端伺服器到底看到了什麼？
+    with st.sidebar.expander("🛠️ 展開查看雲端檔案總管 (Debug)"):
+        st.write("伺服器根目錄下的真實檔案列表：")
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            files = os.listdir(base_dir)
+            st.code("\n".join(files))
+        except Exception as e:
+            st.write(f"無法讀取目錄: {e}")
 # =========================================================================
 # 模組 A：多因子賽前推演
 # =========================================================================
