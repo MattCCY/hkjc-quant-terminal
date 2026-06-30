@@ -97,24 +97,39 @@ init_db()
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_historical_records():
-    # Streamlit Cloud 通常將工作目錄設為 GitHub 儲存庫根目錄
-    possible_paths = [
-        "racing_records2.csv",
-        os.path.join(os.getcwd(), "racing_records2.csv"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "racing_records2.csv")
+    possible_dirs = [
+        os.path.dirname(os.path.abspath(__file__)),
+        os.getcwd()
     ]
     
-    for path in possible_paths:
-        if os.path.exists(path):
+    target_name = "racing_records2.csv"
+    found_path = None
+    
+    # 1. 智能掃描目錄，忽略大小寫尋找檔案
+    for d in possible_dirs:
+        if found_path: break
+        if os.path.exists(d):
             try:
-                df = pd.read_csv(path)
+                for f in os.listdir(d):
+                    if f.lower() == target_name.lower():
+                        found_path = os.path.join(d, f)
+                        break
+            except Exception:
+                pass
+                
+    # 2. 如果找到了檔案，嘗試用不同編碼強力讀取
+    if found_path:
+        encodings_to_try = ['utf-8', 'utf-8-sig', 'big5', 'gb18030', 'latin1']
+        for enc in encodings_to_try:
+            try:
+                df = pd.read_csv(found_path, encoding=enc)
                 # 清洗馬名字串，確保後續比對不會因為空白字元出錯
                 name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
                 if name_cols:
                     df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
                 return df
             except Exception:
-                continue
+                continue # 若編碼錯誤 (UnicodeDecodeError)，自動換下一個編碼再試
                 
     return pd.DataFrame()
 
