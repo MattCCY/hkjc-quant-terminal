@@ -97,16 +97,28 @@ init_db()
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_historical_records():
-    possible_paths = [
-        "racing_records2.csv",
-        os.path.join(os.getcwd(), "racing_records2.csv"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "racing_records2.csv")
-    ]
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    target_name = "racing_records2.csv".lower()
+    found_path = None
     
-    for path in possible_paths:
-        if os.path.exists(path):
+    search_dirs = [base_dir, os.getcwd()]
+    for d in search_dirs:
+        if found_path: break
+        if os.path.exists(d):
             try:
-                df = pd.read_csv(path)
+                for f in os.listdir(d):
+                    if f.lower() == target_name:
+                        found_path = os.path.join(d, f)
+                        break
+            except Exception:
+                pass
+                
+    if found_path:
+        # 強力嘗試多種常見編碼 (針對 Excel 存檔造成的亂碼進行破解)
+        encodings = ['utf-8', 'utf-8-sig', 'big5', 'cp950', 'gb18030', 'latin1']
+        for enc in encodings:
+            try:
+                df = pd.read_csv(found_path, encoding=enc)
                 name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
                 if name_cols:
                     df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
@@ -432,8 +444,15 @@ else:
     with st.sidebar.expander("🛠️ 展開查看雲端檔案總管 (Debug)"):
         st.write("伺服器目錄下的真實檔案列表：")
         try:
-            st.code("\n".join(os.listdir(os.getcwd())))
-            st.code("\n".join(os.listdir(os.path.dirname(os.path.abspath(__file__)))))
+            files_cwd = os.listdir(os.getcwd())
+            files_dir = os.listdir(os.path.dirname(os.path.abspath(__file__)))
+            st.code("Current Dir:\n" + "\n".join(files_cwd))
+            st.code("Script Dir:\n" + "\n".join(files_dir))
+            
+            # 智慧診斷編碼問題
+            all_files = [f.lower() for f in files_cwd + files_dir]
+            if "racing_records2.csv" in all_files:
+                st.error("🚨 檔案明明存在於目錄中，但 Pandas 讀取失敗！這 100% 是 Excel 的「編碼 (Encoding)」問題。請在電腦上用【記事本】打開該 CSV，另存新檔並將編碼選擇為【UTF-8】，然後重新上傳覆蓋 GitHub。")
         except Exception as e:
             st.write(f"無法讀取目錄: {e}")
 
