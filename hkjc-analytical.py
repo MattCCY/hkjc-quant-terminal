@@ -257,81 +257,6 @@ def get_dynamic_human_score(df_hist, role, name):
         
     return score
 
-# 新增：同程往績萃取函數
-def get_same_distance_history(df_hist, horse_names, target_distance_str):
-    if df_hist.empty: return []
-    
-    name_cols = [c for c in df_hist.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
-    dist_cols = [c for c in df_hist.columns if 'dist' in c.lower() or '程' in c or '距離' in c]
-    date_cols = [c for c in df_hist.columns if 'date' in c.lower() or '日期' in c]
-    pos_cols = [c for c in df_hist.columns if 'place' in c.lower() or 'finish' in c.lower() or '名次' in c or 'pos' in c.lower() or 'pl' in c.lower()]
-    
-    if not name_cols or not dist_cols or not date_cols or not pos_cols: return []
-    
-    name_col = name_cols[0]
-    dist_col = dist_cols[0]
-    date_col = date_cols[0]
-    pos_col = pos_cols[0]
-
-    try:
-        target_dist_int = int(str(target_distance_str).replace('米', '').strip())
-    except ValueError:
-        return []
-
-    history_data = []
-    
-    for horse in horse_names:
-        clean_horse_name = str(horse).strip()
-        h_df = df_hist[df_hist[name_col] == clean_horse_name].copy()
-        
-        if h_df.empty:
-            continue
-            
-        # 篩選同程
-        h_df['dist_int'] = h_df[dist_col].astype(str).str.replace('米', '').str.extract(r'(\d+)').astype(float)
-        same_dist_df = h_df[h_df['dist_int'] == target_dist_int]
-        
-        if same_dist_df.empty:
-            history_data.append({
-                "馬匹名稱": clean_horse_name,
-                "同程出賽次數": 0,
-                "最佳名次": "-",
-                "最近一次同程日期": "-",
-                "同程戰績摘要 (名次)": "無同程出賽紀錄"
-            })
-            continue
-            
-        # 排序
-        same_dist_df = same_dist_df.sort_values(date_col, ascending=False)
-        
-        # 擷取摘要
-        runs_count = len(same_dist_df)
-        recent_date = same_dist_df.iloc[0][date_col]
-        
-        positions = same_dist_df[pos_col].astype(str).tolist()
-        
-        def extract_pos_int(p_str):
-            m = re.match(r'^(\d+)', p_str.strip())
-            return int(m.group(1)) if m else 999
-            
-        pos_ints = [extract_pos_int(p) for p in positions]
-        best_pos_int = min(pos_ints) if pos_ints else 999
-        best_pos = str(best_pos_int) if best_pos_int != 999 else "-"
-        
-        summary = " / ".join(positions[:5]) # 顯示最近5次
-        if runs_count > 5:
-            summary += f" (共 {runs_count} 次)"
-            
-        history_data.append({
-            "馬匹名稱": clean_horse_name,
-            "同程出賽次數": runs_count,
-            "最佳名次": best_pos,
-            "最近一次同程日期": recent_date,
-            "同程戰績摘要 (名次)": summary
-        })
-        
-    return history_data
-
 # -------------------------------------------------------------------------
 # 5. 馬會即時爬蟲模組
 # -------------------------------------------------------------------------
@@ -629,16 +554,10 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                         safe_prob = df['EWP (%)'].replace(0, 0.001) / 100
                         df['Implied Place Div ($10)'] = ((10 * 0.835) / safe_prob).clip(lower=10.1)
                         
+                        df['AI_Commentary'] = df.apply(generate_horse_commentary, axis=1)
+                        
                         df = df.sort_values('EWP (%)', ascending=False).reset_index(drop=True)
                         df['Rank'] = df.index + 1
-                        
-                        # 擷取同程往績資料
-                        same_dist_history = get_same_distance_history(df_history, df['馬匹名稱'].tolist(), dist_filter)
-                        history_df = pd.DataFrame(same_dist_history)
-                        
-                        # 將同程戰績合併回主 dataframe 以利排序顯示
-                        if not history_df.empty:
-                            df = pd.merge(df, history_df, on='馬匹名稱', how='left')
 
                     if penalized_jockeys:
                         st.warning(f"⚠️ 模型已介入主觀干預：騎師 {', '.join(penalized_jockeys)} 之 Gamma 分數已受到處分。")
@@ -678,21 +597,16 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                         display_history_df['EWP (%)'] = display_history_df['EWP (%)'].map("{:.1f}%".format)
                         
                         st.dataframe(
-                            display_history_df, 
-                            column_config={
-                                "Rank": "排名",
-                                "馬號": "馬號",
-                                "馬匹名稱": "馬名",
-                                "EWP (%)": "預期勝率",
-                                "同程出賽次數": st.column_config.NumberColumn("出賽次數"),
-                                "最佳名次": "最佳名次",
-                                "最近一次同程日期": "最近日期",
-                                "同程戰績摘要 (名次)": st.column_config.TextColumn("名次摘要 (最近5次)", width="large")
-                            },
-                            use_container_width=True, hide_index=True
-                        )
-                    else:
-                        st.info("⚠️ 無法從資料庫中提取同程往績資料，請確認資料庫連線狀態。")
+                        commentary_df, 
+                        column_config={
+                            "Rank": "排名",
+                            "馬號": "馬號",
+                            "馬匹名稱": "馬名",
+                            "EWP (%)": "預期勝率",
+                            "AI_Commentary": st.column_config.TextColumn("AI 綜合點評", width="large")
+                        },
+                        use_container_width=True, hide_index=True
+                    )
 
                     st.divider()
 
@@ -700,11 +614,16 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                     st.markdown("查閱各項因子分數背後的原始輸入數據與計算乘數。")
                     
                     tab_a, tab_b, tab_c, tab_d = st.tabs(["α: Alpha 數據", "β: Beta 數據", "γ: Gamma 數據", "δ: Delta 數據"])
+
+                    st.markdown("#### 🔍 因子底層數據透視 (Factor Input Details)")
+                    st.markdown("查閱各項因子分數背後的原始輸入數據與計算乘數。")
+                    
+                    tab_a, tab_b, tab_c, tab_d = st.tabs(["α: 動能與步速數據", "β: 檔位數據", "γ: 騎練數據", "δ: 評分壓制數據 (Class Edge)"])
                     
                     with tab_a:
-                        alpha_df = df[['Rank', '馬號', '馬匹名稱', '近績', 'Base_Form', 'Time_Multiplier', 'Dist_Shift_Multiplier', 'Alpha']].copy()
-                        alpha_df.columns = ['排名', '馬號', '馬匹名稱', '近績(6仗)', '近績基礎分', '時間動能乘數', '途程轉換乘數', 'Alpha 最終得分']
-                        st.dataframe(alpha_df.style.format({'近績基礎分': "{:.1f}", '時間動能乘數': "{:.2f}x", '途程轉換乘數': "{:.2f}x", 'Alpha 最終得分': "{:.1f}"}), use_container_width=True, hide_index=True)
+                        alpha_df = df[['Rank', '馬號', '馬匹名稱', 'Run_Style', 'Pace_Multiplier', 'Time_Multiplier', 'Dist_Shift_Multiplier', 'Alpha']].copy()
+                        alpha_df.columns = ['排名', '馬號', '馬匹名稱', '慣常跑法', '預期步速乘數', '時間動能乘數', '途程轉換乘數', 'Alpha 最終得分']
+                        st.dataframe(alpha_df.style.format({'預期步速乘數': "{:.2f}x", '時間動能乘數': "{:.2f}x", '途程轉換乘數': "{:.2f}x", 'Alpha 最終得分': "{:.1f}"}), use_container_width=True, hide_index=True)
                     
                     with tab_b:
                         beta_df = df[['Rank', '馬號', '馬匹名稱', '檔位', 'Beta']].copy()
@@ -718,9 +637,9 @@ if selected_page == "📊 多因子賽前推演 (Multi-Factor Inference)":
                         st.dataframe(gamma_df, use_container_width=True, hide_index=True)
                         
                     with tab_d:
-                        delta_df = df[['Rank', '馬號', '馬匹名稱', '評分', '負磅', 'Delta']].copy()
-                        delta_df.columns = ['排名', '馬號', '馬匹名稱', '現時評分', '實際負磅', 'Delta 最終得分 (分/磅*100)']
-                        st.dataframe(delta_df.style.format({'Delta 最終得分 (分/磅*100)': "{:.2f}"}), use_container_width=True, hide_index=True)
+                        delta_df = df[['Rank', '馬號', '馬匹名稱', '評分', 'Class_Edge', '負磅', 'Weight_Pen', 'Delta']].copy()
+                        delta_df.columns = ['排名', '馬號', '馬匹名稱', '現時評分', '評分差距 (vs 均值)', '實際負磅', '負磅差距 (vs 均值)', 'Delta 最終得分']
+                        st.dataframe(delta_df.style.format({'評分差距 (vs 均值)': "{:+.1f}", '負磅差距 (vs 均值)': "{:+.1f}", 'Delta 最終得分': "{:.1f}"}), use_container_width=True, hide_index=True)
 
                     st.divider()
                     
