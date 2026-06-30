@@ -93,39 +93,30 @@ def save_ratings_to_db(ratings_dict):
 init_db()
 
 # -------------------------------------------------------------------------
-# 3. 歷史資料庫 (強化版讀取器)
+# 3. 歷史資料庫 (精確鎖定 GitHub 根目錄的 racing_records2.csv)
 # -------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_historical_records():
-    # 確保路徑是以當前腳本所在的目錄為基準
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(base_dir, "racing_records2.csv")
+    # Streamlit Cloud 通常將工作目錄設為 GitHub 儲存庫根目錄
+    possible_paths = [
+        "racing_records2.csv",
+        os.path.join(os.getcwd(), "racing_records2.csv"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "racing_records2.csv")
+    ]
     
-    if os.path.exists(csv_path):
-        try:
-            df = pd.read_csv(csv_path)
-            # 清洗馬名字串，確保後續比對不會因為空白字元出錯
-            name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
-            if name_cols:
-                df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
-            return df
-        except Exception as e:
-            st.sidebar.error(f"讀取 CSV 時發生錯誤: {e}")
-            return pd.DataFrame()
-    else:
-        # 備用路徑尋找 (針對某些雲端部署環境)
-        fallback_path = "racing_records2.csv"
-        if os.path.exists(fallback_path):
-             try:
-                 df = pd.read_csv(fallback_path)
-                 name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
-                 if name_cols:
-                     df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
-                 return df
-             except Exception:
-                 pass
-        
-        return pd.DataFrame()
+    for path in possible_paths:
+        if os.path.exists(path):
+            try:
+                df = pd.read_csv(path)
+                # 清洗馬名字串，確保後續比對不會因為空白字元出錯
+                name_cols = [c for c in df.columns if 'name' in c.lower() or '馬名' in c or '馬匹' in c]
+                if name_cols:
+                    df[name_cols[0]] = df[name_cols[0]].astype(str).str.strip()
+                return df
+            except Exception:
+                continue
+                
+    return pd.DataFrame()
 
 # -------------------------------------------------------------------------
 # 4. 數據驅動因子運算引擎 (Alpha & Gamma)
@@ -218,9 +209,10 @@ def get_dynamic_human_score(df_hist, role, name):
     
     clean_name = name.split('(')[0].strip()
     
-    # 防呆處理：確保欄位都是字串型態才能使用 str.contains
-    df_hist['temp_clean_role'] = df_hist[role_col].astype(str).apply(lambda x: x.split('(')[0].strip())
-    df_target = df_hist[df_hist['temp_clean_role'].str.contains(clean_name, na=False, regex=False)]
+    # 防呆處理：絕不修改 df_hist 避免 Streamlit Cache 崩潰
+    # 使用獨立的 Series 進行處理與比對
+    clean_roles = df_hist[role_col].astype(str).apply(lambda x: x.split('(')[0].strip())
+    df_target = df_hist[clean_roles.str.contains(clean_name, na=False, regex=False)]
     
     if len(df_target) == 0: return 5 
     
@@ -236,7 +228,7 @@ def get_dynamic_human_score(df_hist, role, name):
         return 1 if s == '1' else 0
         
     wins = df_recent[pos_col].apply(is_win).sum()
-    win_rate = wins / len(df_recent)
+    win_rate = wins / len(df_recent) if len(df_recent) > 0 else 0
     
     score = 0
     if role == 'Jockey':
@@ -393,11 +385,10 @@ else:
     
     # 開發者除錯面板：看看雲端伺服器到底看到了什麼？
     with st.sidebar.expander("🛠️ 展開查看雲端檔案總管 (Debug)"):
-        st.write("伺服器根目錄下的真實檔案列表：")
+        st.write("伺服器目錄下的真實檔案列表：")
         try:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            files = os.listdir(base_dir)
-            st.code("\n".join(files))
+            st.code("\n".join(os.listdir(os.getcwd())))
+            st.code("\n".join(os.listdir(os.path.dirname(os.path.abspath(__file__)))))
         except Exception as e:
             st.write(f"無法讀取目錄: {e}")
 
